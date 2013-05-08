@@ -1,0 +1,565 @@
+package com.taiji.eap.util;
+
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.util.HashMap;
+import java.util.Iterator;
+
+import com.taiji.eap.core.EapConstants;
+import com.taiji.eap.core.database.DatabaseHelper;
+
+public class SQLHelper {
+	private static String charSet = "UTF-8";
+
+	public static String getPagetationSql(int pageNo, int interval,
+			int databaseType, String sql, String order) {
+
+		order = StringUtils.replace(order, "ORDER BY", " ");
+
+		if (pageNo < 0 || interval <= 0) {
+			return order.equals("") ? sql : (sql + " ORDER BY " + order);
+		}
+
+		int istart = pageNo * interval;
+		int iend = (pageNo + 1) * interval;
+
+		String sqlSelect = sql.substring(0, sql.indexOf(" FROM ") + 1);
+		String sqlFrom = sql.substring(sql.indexOf(" FROM "));
+
+		if (databaseType == EapConstants.DataSource.ORACLE) {
+			sql = " SELECT * FROM (" + sqlSelect
+					+ ", ROW_NUMBER() OVER( ORDER BY " + order + ") RN "
+					+ sqlFrom + ") WHERE RN>" + istart + " AND RN<=" + iend;
+		} else if (databaseType == EapConstants.DataSource.SQLSERVER) {
+			String descOrder = getDescOrder(order);
+			sql = "SELECT T_B.* FROM (SELECT TOP " + (iend - istart)
+					+ " T_A.* FROM (" + " SELECT TOP " + iend + " "
+					+ sqlSelect.substring(sqlSelect.indexOf("SELECT") + 6)
+					+ " " + sqlFrom + " ORDER BY " + order + ") T_A ORDER BY "
+					+ descOrder + ") T_B ORDER BY " + order;
+		}
+
+		return sql;
+	}
+
+	static public String getBlobString(String tableName,
+			HashMap filterContents, String blobFieldName, Connection conn) {
+		PreparedStatement stmt = null;
+		String tmp = "";
+		try {
+			String sql = " SELECT " + blobFieldName + " FROM " + tableName;
+			String[] pId = null;
+			String[] pValue = null;
+			int leng1 = filterContents.size();
+			// 拼SQL的WHERE部分
+			if (!filterContents.isEmpty()) {
+				sql += " WHERE ";
+				pId = new String[leng1];
+				pValue = new String[leng1];
+				Iterator it1 = filterContents.keySet().iterator();
+				int k1 = 0;
+				while (it1.hasNext()) {
+					pId[k1] = (String) it1.next();
+					sql += pId[k1] + "=? AND ";
+					pValue[k1] = (String) filterContents.get(pId[k1]);
+					k1++;
+				}
+				sql = sql.substring(0, sql.length() - 4);
+			}
+
+			stmt = conn.prepareStatement(sql);
+			for (int i = 0; i < leng1; i++) {
+				stmt.setString(i + 1, pValue[i]);
+			}
+
+			InputStream stream = null;
+			ResultSet rs = stmt.executeQuery();
+			if (rs.next()) {
+				stream = rs.getBlob(1).getBinaryStream();
+			}
+			StringBuffer sb = new StringBuffer("");
+			if (stream != null) {
+				byte[] b = new byte[1024];
+				int leng = 0;
+				while ((leng = stream.read(b)) != -1) {
+					if (leng == 1024)
+						sb.append(new String(b));
+					else
+						sb.append(new String(b, 0, leng));
+				}
+			}
+			tmp = sb.toString();
+			rs.close();
+			stmt.close();
+			stmt = null;
+		} catch (Exception ex) {
+			ex.printStackTrace();
+		} finally {
+			if (stmt != null)
+				try {
+					stmt.close();
+				} catch (Exception e) {
+					e.printStackTrace();
+				}
+		}
+		return StringUtils.trim(tmp);
+	}
+
+	static public void recordBlobContents(HashMap contents,
+			String blobFieldName, String tableName, Connection conn, String key)
+			throws Exception {
+
+		int databasetype = DatabaseHelper.getDatabaseType(key);
+		if (databasetype == EapConstants.DataSource.ORACLE) {
+			String driverclass = DatabaseHelper.getDriverClass(key);
+			if (EapConstants.DataSource.ORACLE_DRIVER_CLASS.equals(driverclass)) {
+				recordBlobContents_Oracle(contents, blobFieldName, tableName,
+						conn, key);
+				return;
+			} else if (EapConstants.DataSource.WEBLOGIC_ORACLE_DRIVER_CLASS
+					.equals(driverclass)) {
+				recordBlobContents_Weblogic_Oracle_DS(contents, blobFieldName,
+						tableName, conn, key);
+				return;
+			}
+		}
+
+		// TODO 其他类型的数据库大字段操作，暂用此方法代替，
+		// by lvtao
+		recordBlobContents_Oracle(contents, blobFieldName, tableName, conn, key);
+	}
+
+	static public void recordBlobContents_Weblogic_Oracle_DS(HashMap contents,
+			String blobFieldName, String tableName, Connection conn, String key)
+			throws Exception {
+
+		PreparedStatement stmt = null;
+		int counts = 0;
+		try {
+			String sql = "INSERT INTO " + tableName + "(";
+			String select_sql = "SELECT " + blobFieldName + " FROM "
+					+ tableName + " WHERE ";
+			String select_sql_where = "";
+			String blobValue = "";
+			String value_sql = "";
+			if (!contents.isEmpty()) {
+				int leng = contents.size();
+				String[] propertyId = new String[leng];
+				String[] propertyValue = new String[leng];
+				String[] whereValue = new String[leng - 1];
+				Iterator it = contents.keySet().iterator();
+				int k = 0;
+				int k2 = 0;
+				while (it.hasNext()) {
+					propertyId[k] = (String) it.next();
+					sql += propertyId[k] + ",";
+					value_sql += "?,";
+					propertyValue[k] = (String) contents.get(propertyId[k]);
+					if (!propertyId[k].equals(blobFieldName)) {
+						select_sql_where += "AND " + propertyId[k] + "=? ";
+						whereValue[k2] = propertyValue[k];
+						k2++;
+					}
+					k++;
+
+				}
+
+				sql = sql.substring(0, sql.length() - 1);
+				value_sql = value_sql.substring(0, value_sql.length() - 1);
+				sql += ") VALUES(" + value_sql + ")";
+
+				stmt = conn.prepareStatement(sql);
+				for (int i = 0; i < leng; i++) {
+					if (propertyId[i].equals(blobFieldName)) {
+						stmt.setString(i + 1, "00");
+						blobValue = propertyValue[i];
+					} else {
+						stmt.setString(i + 1, propertyValue[i]);
+					}
+				}
+
+				stmt.executeUpdate();
+				stmt.close();
+
+				select_sql += select_sql_where.substring(3) + " FOR UPDATE ";
+				stmt = conn.prepareStatement(select_sql);
+				for (int i = 0; i < k2; i++) {
+					stmt.setString(i + 1, whereValue[i]);
+				}
+				ResultSet rs = stmt.executeQuery();
+				java.sql.Blob blob = null;
+				if (rs.next())
+					blob = rs.getBlob(blobFieldName);
+				if (blob != null) {
+					stmt = conn.prepareStatement(" UPDATE " + tableName
+							+ " SET " + blobFieldName + "=? WHERE "
+							+ select_sql_where.substring(3));
+					byte[] bs = blobValue.getBytes();
+					OutputStream os = ((weblogic.jdbc.vendor.oracle.OracleThinBlob) blob)
+							.getBinaryOutputStream();
+					os.write(bs);
+					os.flush();
+					os.close();
+
+				}
+				stmt.close();
+				stmt = null;
+			}
+		} catch (Exception ex) {
+			throw ex;
+		} finally {
+			if (stmt != null)
+				try {
+					stmt.close();
+				} catch (Exception e) {
+					e.printStackTrace();
+				}
+		}
+	}
+
+	static public void recordBlobContents_Oracle(HashMap contents,
+			String blobFieldName, String tableName, Connection conn, String key)
+			throws Exception {
+
+		PreparedStatement stmt = null;
+		int counts = 0;
+		try {
+			String sql = "INSERT INTO " + tableName + "(";
+			String select_sql = "SELECT " + blobFieldName + " FROM "
+					+ tableName + " WHERE ";
+			String select_sql_where = "";
+			String blobValue = "";
+			String value_sql = "";
+			if (!contents.isEmpty()) {
+				int leng = contents.size();
+				String[] propertyId = new String[leng];
+				String[] propertyValue = new String[leng];
+				String[] whereValue = new String[leng - 1];
+				Iterator it = contents.keySet().iterator();
+				int k = 0;
+				int k2 = 0;
+				while (it.hasNext()) {
+					propertyId[k] = (String) it.next();
+					sql += propertyId[k] + ",";
+					value_sql += "?,";
+					propertyValue[k] = (String) contents.get(propertyId[k]);
+					if (!propertyId[k].equals(blobFieldName)) {
+						select_sql_where += "AND " + propertyId[k] + "=? ";
+						whereValue[k2] = propertyValue[k];
+						k2++;
+					}
+					k++;
+
+				}
+
+				sql = sql.substring(0, sql.length() - 1);
+				value_sql = value_sql.substring(0, value_sql.length() - 1);
+				sql += ") VALUES(" + value_sql + ")";
+
+				stmt = conn.prepareStatement(sql);
+				for (int i = 0; i < leng; i++) {
+					if (propertyId[i].equals(blobFieldName)) {
+						stmt.setString(i + 1, "00");
+						blobValue = propertyValue[i];
+					} else {
+						stmt.setString(i + 1, propertyValue[i]);
+					}
+				}
+
+				stmt.executeUpdate();
+				stmt.close();
+
+				select_sql += select_sql_where.substring(3) + " FOR UPDATE ";
+				stmt = conn.prepareStatement(select_sql);
+				for (int i = 0; i < k2; i++) {
+					stmt.setString(i + 1, whereValue[i]);
+				}
+				ResultSet rs = stmt.executeQuery();
+				java.sql.Blob blob = null;
+				if (rs.next())
+					blob = rs.getBlob(blobFieldName);
+				if (blob != null) {
+					stmt = conn.prepareStatement(" UPDATE " + tableName
+							+ " SET " + blobFieldName + "=? WHERE "
+							+ select_sql_where.substring(3));
+					byte[] bs = blobValue.getBytes();
+					OutputStream os = ((oracle.sql.BLOB) blob)
+							.getBinaryOutputStream();
+					os.write(bs);
+					os.flush();
+					os.close();
+
+				}
+				stmt.close();
+				stmt = null;
+			}
+		} catch (Exception ex) {
+			throw ex;
+		} finally {
+			if (stmt != null)
+				try {
+					stmt.close();
+				} catch (Exception e) {
+					e.printStackTrace();
+				}
+		}
+	}
+
+	static public int updateBlobContents(HashMap contents,
+			String blobFieldName, String tableName, HashMap filterContents,
+			Connection conn, String key) throws Exception {
+		int databasetype = DatabaseHelper.getDatabaseType(key);
+		if (databasetype == EapConstants.DataSource.ORACLE) {
+			String driverclass = DatabaseHelper.getDriverClass(key);
+			if (EapConstants.DataSource.ORACLE_DRIVER_CLASS.equals(driverclass)) {
+				return updateBlobContents_Oracle(contents, blobFieldName,
+						tableName, filterContents, conn, key);
+			} else if (EapConstants.DataSource.WEBLOGIC_ORACLE_DRIVER_CLASS
+					.equals(driverclass)) {
+				return updateBlobContents_Weblogic_Oracle_DS(contents,
+						blobFieldName, tableName, filterContents, conn, key);
+			}
+		}
+
+		// TODO 其他类型的数据库大字段操作，暂用此方法代替，
+		// by lvtao
+		return updateBlobContents_Oracle(contents, blobFieldName, tableName,
+				filterContents, conn, key);
+	}
+
+	/**
+	 * 
+	 * @param contents
+	 * @param blobFieldName
+	 * @param tableName
+	 * @param filterContents
+	 * @param conn
+	 * @param key
+	 * @return
+	 * @author lvtao
+	 * @throws Exception
+	 */
+	static public int updateBlobContents_Weblogic_Oracle_DS(HashMap contents,
+			String blobFieldName, String tableName, HashMap filterContents,
+			Connection conn, String key) throws Exception {
+		PreparedStatement stmt = null;
+		int counts = 0;
+		try {
+			String select_sql = "SELECT " + blobFieldName + " FROM "
+					+ tableName;
+			String sql = " UPDATE " + tableName + " SET ";
+			if (!contents.isEmpty()) {
+
+				// 更新值
+				int leng = contents.size();
+				String[] propertyId = new String[leng];
+				String[] propertyValue = new String[leng];
+
+				// 条件
+				int leng1 = filterContents.size();
+				String[] pId = null;
+				String[] pValue = null;
+
+				// 拼SQL
+				Iterator it = contents.keySet().iterator();
+				int k = 0;
+				while (it.hasNext()) {
+					propertyId[k] = (String) it.next();
+					sql += propertyId[k] + "=? ,";
+					propertyValue[k] = (String) contents.get(propertyId[k]);
+					k++;
+				}
+				sql = sql.substring(0, sql.length() - 1);
+				String sql_where = "";
+				// 拼SQL的WHERE部分
+				if (!filterContents.isEmpty()) {
+					sql_where += " WHERE ";
+					pId = new String[leng1];
+					pValue = new String[leng1];
+					Iterator it1 = filterContents.keySet().iterator();
+					int k1 = 0;
+					while (it1.hasNext()) {
+						pId[k1] = (String) it1.next();
+						sql_where += pId[k1] + "=? AND ";
+						pValue[k1] = (String) filterContents.get(pId[k1]);
+						k1++;
+					}
+				}
+
+				sql += sql_where.substring(0, sql_where.length() - 4);
+				stmt = conn.prepareStatement(sql);
+				for (int i = 0; i < leng; i++) {
+					if (propertyId[i].equals(blobFieldName)) {
+						stmt.setString(i + 1, "00");
+					} else {
+						stmt.setString(i + 1, propertyValue[i]);
+					}
+				}
+
+				for (int i = 0; i < leng1; i++) {
+					stmt.setString(i + leng + 1, pValue[i]);
+				}
+
+				counts = stmt.executeUpdate();
+				stmt.close();
+
+				select_sql += sql_where.substring(0, sql_where.length() - 4)
+						+ " FOR UPDATE ";
+				stmt = conn.prepareStatement(select_sql);
+				for (int i = 0; i < leng1; i++) {
+					stmt.setString(i + 1, pValue[i]);
+				}
+				ResultSet rs = stmt.executeQuery();
+				java.sql.Blob blob = null;
+				if (rs.next())
+					blob = rs.getBlob(blobFieldName);
+				for (int i = 0; i < leng; i++) {
+					if (propertyId[i].equals(blobFieldName)) {
+						byte[] bs = propertyValue[i].getBytes();
+						OutputStream os = ((weblogic.jdbc.vendor.oracle.OracleThinBlob) blob)
+								.getBinaryOutputStream();
+						os.write(bs);
+						os.flush();
+						os.close();
+						break;
+					}
+				}
+				stmt.close();
+				stmt = null;
+			}
+		} catch (Exception ex) {
+			throw ex;
+		} finally {
+			if (stmt != null)
+				try {
+					stmt.close();
+				} catch (Exception e) {
+					e.printStackTrace();
+				}
+		}
+		return counts;
+	}
+
+	static public int updateBlobContents_Oracle(HashMap contents,
+			String blobFieldName, String tableName, HashMap filterContents,
+			Connection conn, String key) throws Exception {
+		PreparedStatement stmt = null;
+		int counts = 0;
+		try {
+			String select_sql = "SELECT " + blobFieldName + " FROM "
+					+ tableName;
+			String sql = " UPDATE " + tableName + " SET ";
+			if (!contents.isEmpty()) {
+
+				// 更新值
+				int leng = contents.size();
+				String[] propertyId = new String[leng];
+				String[] propertyValue = new String[leng];
+
+				// 条件
+				int leng1 = filterContents.size();
+				String[] pId = null;
+				String[] pValue = null;
+
+				// 拼SQL
+				Iterator it = contents.keySet().iterator();
+				int k = 0;
+				while (it.hasNext()) {
+					propertyId[k] = (String) it.next();
+					sql += propertyId[k] + "=? ,";
+					propertyValue[k] = (String) contents.get(propertyId[k]);
+					k++;
+				}
+				sql = sql.substring(0, sql.length() - 1);
+				String sql_where = "";
+				// 拼SQL的WHERE部分
+				if (!filterContents.isEmpty()) {
+					sql_where += " WHERE ";
+					pId = new String[leng1];
+					pValue = new String[leng1];
+					Iterator it1 = filterContents.keySet().iterator();
+					int k1 = 0;
+					while (it1.hasNext()) {
+						pId[k1] = (String) it1.next();
+						sql_where += pId[k1] + "=? AND ";
+						pValue[k1] = (String) filterContents.get(pId[k1]);
+						k1++;
+					}
+				}
+
+				sql += sql_where.substring(0, sql_where.length() - 4);
+				stmt = conn.prepareStatement(sql);
+				for (int i = 0; i < leng; i++) {
+					if (propertyId[i].equals(blobFieldName)) {
+						stmt.setString(i + 1, "00");
+					} else {
+						stmt.setString(i + 1, propertyValue[i]);
+					}
+				}
+
+				for (int i = 0; i < leng1; i++) {
+					stmt.setString(i + leng + 1, pValue[i]);
+				}
+
+				counts = stmt.executeUpdate();
+				stmt.close();
+
+				select_sql += sql_where.substring(0, sql_where.length() - 4)
+						+ " FOR UPDATE ";
+				stmt = conn.prepareStatement(select_sql);
+				for (int i = 0; i < leng1; i++) {
+					stmt.setString(i + 1, pValue[i]);
+				}
+				ResultSet rs = stmt.executeQuery();
+				java.sql.Blob blob = null;
+				if (rs.next())
+					blob = rs.getBlob(blobFieldName);
+				for (int i = 0; i < leng; i++) {
+					if (propertyId[i].equals(blobFieldName)) {
+						byte[] bs = propertyValue[i].getBytes();
+						OutputStream os = ((oracle.sql.BLOB) blob)
+								.getBinaryOutputStream(0);
+						os.write(bs);
+						os.flush();
+						os.close();
+						break;
+					}
+				}
+				stmt.close();
+				stmt = null;
+			}
+		} catch (Exception ex) {
+			throw ex;
+		} finally {
+			if (stmt != null)
+				try {
+					stmt.close();
+				} catch (Exception e) {
+					e.printStackTrace();
+				}
+		}
+		return counts;
+	}
+
+	private static String getDescOrder(String order) {
+		String[] orders = StringUtils.split(order, ",");
+		order = "";
+		for (int i = 0; i < orders.length; i++) {
+			if (orders[i].indexOf("DESC") != -1)
+				orders[i] = StringUtils.replace(orders[i], "DESC", " ");
+			else
+				orders[i] += " DESC ";
+			order += orders[i] + ",";
+		}
+		return order.substring(0, order.length() - 1);
+	}
+
+	public static int exeCountSQL(String sql) {
+		int tmp = 0;
+		tmp = StringUtils.getAsInt(SQLUtils.getOneFieldContent(sql), 0);
+		return tmp;
+	}
+}

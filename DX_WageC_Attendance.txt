@@ -1,8 +1,5 @@
 ﻿create or replace function DX_WageC_Attendance( tBranchType in varchar2,tAgentCode in varchar2, tWageNo in INTEGER) return number is
-/*2*/
- /**/
- /**/
-  /**/
+ 
   tWageCode varchar2(10) :='DXC002';
   mK4 number(12,4):=0;                      /*本月缺勤天数*/
   mPinCai     number(20, 6) := 0;   -- 聘才津贴

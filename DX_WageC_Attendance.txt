@@ -1,4 +1,5 @@
 ﻿create or replace function DX_WageC_Attendance( tBranchType in varchar2,tAgentCode in varchar2, tWageNo in INTEGER) return number is
+/*2*/
  /**/
  /**/
   /**/
